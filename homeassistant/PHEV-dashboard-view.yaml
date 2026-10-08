@@ -1,0 +1,76 @@
+title: Outlander PHEV
+path: phev
+icon: mdi:car
+cards:
+  - type: entities
+    title: Dernier relevé
+    entities:
+      - sensor.phev_soc_pilotage
+      - sensor.phev_age_mesure
+      - sensor.phev_etat_passerelle
+      - input_text.phev_dernier_resultat
+  - type: button
+    name: Actualiser les infos
+    icon: mdi:refresh
+    tap_action:
+      action: perform-action
+      perform_action: script.phev_actualiser
+  - type: entities
+    title: Préclimatisation
+    entities:
+      - input_select.phev_duree
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: button
+        name: Chauffer
+        icon: mdi:radiator
+        tap_action:
+          action: perform-action
+          perform_action: script.phev_chauffer
+          confirmation:
+            text: Envoyer une demande de chauffage à votre voiture ?
+      - type: button
+        name: Refroidir
+        icon: mdi:snowflake
+        tap_action:
+          action: perform-action
+          perform_action: script.phev_refroidir
+          confirmation:
+            text: Envoyer une demande de refroidissement à votre voiture ?
+      - type: button
+        name: Désembuer
+        icon: mdi:car-defrost-front
+        tap_action:
+          action: perform-action
+          perform_action: script.phev_degivrer
+          confirmation:
+            text: Envoyer une demande de désembuage à votre voiture ?
+      - type: button
+        name: Arrêter
+        icon: mdi:stop-circle
+        tap_action:
+          action: perform-action
+          perform_action: script.phev_arreter
+  - type: entities
+    title: Diagnostic et maintenance
+    entities:
+      - sensor.outlander_phev_remote_session_status
+      - sensor.outlander_phev_remote_wifi_rssi
+      - binary_sensor.outlander_phev_remote_climate_on
+      - binary_sensor.outlander_phev_remote_plug_connected
+  - type: button
+    name: Maintenance AP
+    tap_action:
+      action: perform-action
+      perform_action: script.phev_maintenance_ap
+      confirmation:
+        text: Redémarrer en AP ? Zigbee sera suspendu.
+  - type: button
+    name: Maintenance Wi-Fi maison
+    tap_action:
+      action: perform-action
+      perform_action: script.phev_maintenance_wifi
+      confirmation:
+        text: Redémarrer en maintenance Wi-Fi maison ? Zigbee sera suspendu.

@@ -1,0 +1,406 @@
+# À fusionner dans les clés HA existantes, sans remplacer la configuration.
+# Firmware public 0.1.0-beta.1 : session_word est le résultat atomique d'une session.
+# Pas de répétition, préchauffage automatique ni polling : le firmware lit à la
+# demande et tente déjà une actualisation toutes les 24 heures.
+# QoS 0 : le broker ne retransmet pas une commande après la fin de sa session.
+input_select:
+  phev_duree:
+    name: "PHEV · durée de préclimatisation"
+    icon: mdi:timer-outline
+    options: ["10", "20", "30"]
+    initial: "10"
+
+input_boolean:
+  phev_notifications:
+    name: "PHEV · notifications des demandes"
+    icon: mdi:bell-outline
+    initial: false
+
+input_text:
+  phev_dernier_resultat:
+    name: "PHEV · résultat de la dernière demande"
+    icon: mdi:message-text-outline
+    max: 255
+
+template:
+  # Un message retained peut restaurer d'anciennes valeurs avec last_updated
+  # égal à maintenant. Une seule valeur initiale ne prouve pas la présence de
+  # la passerelle : attendre un changement numérique->numérique de l'uptime.
+  - triggers:
+      - trigger: homeassistant
+        event: start
+        id: demarrage
+      - trigger: state
+        entity_id: sensor.outlander_phev_remote_uptime
+        id: heartbeat
+      - trigger: time_pattern
+        seconds: "/30"
+        id: expiration
+    binary_sensor:
+      - name: "PHEV rapports récents"
+        unique_id: phev_rapports_recents
+        default_entity_id: binary_sensor.phev_rapports_recents
+        device_class: connectivity
+        icon: mdi:access-point-check
+        state: >-
+          {% set u = states.sensor.outlander_phev_remote_uptime %}
+          {% set age = as_timestamp(now()) - as_timestamp(u.last_updated, 0)
+                       if u is defined and u is not none else -1 %}
+          {% set current = states('sensor.outlander_phev_remote_uptime') | float(-1) %}
+          {% set fresh = u is defined and u is not none and 0 <= age <= 120
+                         and 0 <= current < 1000000000 %}
+          {% if trigger.id == 'demarrage' or not fresh %}false
+          {% elif trigger.id == 'heartbeat'
+                  and trigger.from_state is not none and trigger.to_state is not none
+                  and 0 <= trigger.from_state.state | float(-1) < 1000000000
+                  and 0 <= trigger.to_state.state | float(-1) < 1000000000
+                  and trigger.from_state.state | float(-1) != trigger.to_state.state | float(-1) %}
+            true
+          {% else %}{{ this.state == 'on' if this is defined and this is not none else false }}{% endif %}
+
+  - sensor:
+      # Chaque âge reçu est ancré à la réception de battery_age, et non au
+      # dernier message MQTT global. L'âge continue d'augmenter si Zigbee cesse.
+      # Après expiration de la preuve de présence, date/âge deviennent inconnus
+      # plutôt que d'afficher comme frais un relevé retained non vérifié.
+      - name: "PHEV âge mesure"
+        unique_id: phev_age_mesure
+        default_entity_id: sensor.phev_age_mesure
+        unit_of_measurement: min
+        icon: mdi:clock-outline
+        availability: >-
+          {% set s = states.sensor.outlander_phev_remote_battery_age %}
+          {% set live = states.binary_sensor.phev_rapports_recents %}
+          {% set age = states('sensor.outlander_phev_remote_battery_age') | float(-1) %}
+          {{ is_state('binary_sensor.phev_rapports_recents', 'on')
+             and live is defined and live is not none
+             and s is defined and s is not none and age >= 0 and age < 1000000000
+             and as_timestamp(s.last_updated, 0) >= as_timestamp(live.last_changed, 0) > 0
+             and as_timestamp(s.last_updated, 0) > 0
+             and as_timestamp(now()) >= as_timestamp(s.last_updated, 0) }}
+        state: >-
+          {% set s = states.sensor.outlander_phev_remote_battery_age %}
+          {% set age = states('sensor.outlander_phev_remote_battery_age') | float(-1) %}
+          {% if s is defined and s is not none and age >= 0 and age < 1000000000
+                and as_timestamp(s.last_updated, 0) > 0
+                and as_timestamp(now()) >= as_timestamp(s.last_updated, 0) %}
+            {{ ((age + as_timestamp(now()) - as_timestamp(s.last_updated)) / 60) | round(1) }}
+          {% else %}{{ none }}{% endif %}
+
+      - name: "PHEV dernière mesure"
+        unique_id: phev_derniere_mesure
+        default_entity_id: sensor.phev_derniere_mesure
+        device_class: timestamp
+        icon: mdi:calendar-clock
+        availability: >-
+          {% set s = states.sensor.outlander_phev_remote_battery_age %}
+          {% set live = states.binary_sensor.phev_rapports_recents %}
+          {% set age = states('sensor.outlander_phev_remote_battery_age') | float(-1) %}
+          {{ is_state('binary_sensor.phev_rapports_recents', 'on')
+             and live is defined and live is not none
+             and s is defined and s is not none and age >= 0 and age < 1000000000
+             and as_timestamp(s.last_updated, 0) >= as_timestamp(live.last_changed, 0) > 0
+             and as_timestamp(s.last_updated, 0) > 0
+             and as_timestamp(now()) >= as_timestamp(s.last_updated, 0) }}
+        state: >-
+          {% set s = states.sensor.outlander_phev_remote_battery_age %}
+          {% set age = states('sensor.outlander_phev_remote_battery_age') | float(-1) %}
+          {% if s is defined and s is not none and age >= 0 and age < 1000000000
+                and as_timestamp(s.last_updated, 0) > 0
+                and as_timestamp(now()) >= as_timestamp(s.last_updated, 0) %}
+            {{ (as_timestamp(s.last_updated) - age) | timestamp_local }}
+          {% else %}{{ none }}{% endif %}
+
+      # La valeur brute Zigbee reste le dernier relevé, même TCP fermé.
+      # Seul ce capteur filtré doit alimenter input_text.tempo_outlander_soc_entity.
+      - name: "PHEV SOC pilotage"
+        unique_id: phev_soc_pilotage
+        default_entity_id: sensor.phev_soc_pilotage
+        device_class: battery
+        unit_of_measurement: "%"
+        icon: mdi:car-electric
+        availability: >-
+          {% set s = states.sensor.outlander_phev_remote_battery_age %}
+          {% set live = states.binary_sensor.phev_rapports_recents %}
+          {% set age = states('sensor.outlander_phev_remote_battery_age') | float(-1) %}
+          {% set soc = states('sensor.outlander_phev_remote_battery') | float(-1) %}
+          {% set elapsed = as_timestamp(now()) - as_timestamp(s.last_updated, 0)
+                           if s is defined and s is not none else -1 %}
+          {{ is_state('binary_sensor.phev_rapports_recents', 'on')
+             and live is defined and live is not none
+             and s is defined and s is not none
+             and as_timestamp(s.last_updated, 0) >= as_timestamp(live.last_changed, 0) > 0
+             and is_state('binary_sensor.outlander_phev_remote_battery_valid', 'on')
+             and 0 <= soc <= 100 and age >= 0 and elapsed >= 0
+             and age + elapsed <= 900 }}
+        state: "{{ states('sensor.outlander_phev_remote_battery') | float(-1) }}"
+
+      # uptime change réellement toutes les ~30 s. Son last_updated permet
+      # de déceler la perte de rapports, même si le dernier SOC est conservé.
+      - name: "PHEV état passerelle"
+        unique_id: phev_etat_passerelle
+        default_entity_id: sensor.phev_etat_passerelle
+        icon: mdi:access-point-network
+        state: >-
+          {% set u = states.sensor.outlander_phev_remote_uptime %}
+          {% set mode = states('sensor.outlander_phev_remote_gateway_mode') %}
+          {% set word = states('sensor.outlander_phev_remote_session_word') | float(-1) %}
+          {% set delay = as_timestamp(now()) - as_timestamp(u.last_updated, 0)
+                         if u is defined and u is not none else -1 %}
+          {% if mode == 'ap' %}Maintenance AP · Zigbee suspendu
+          {% elif mode == 'wifi-seb' %}Maintenance Wi-Fi maison · Zigbee suspendu
+          {% elif not is_state('binary_sensor.phev_rapports_recents', 'on')
+                    or u is not defined or u is none or not (0 <= delay <= 120)
+                    or not (0 <= states('sensor.outlander_phev_remote_uptime') | float(-1) < 1000000000) %}
+            Passerelle sans rapport récent
+          {% elif mode != 'normal' %}Mode passerelle inconnu
+          {% elif not (0 <= word <= 16777215 and word == word | int(-1)
+                       and (word == 0 or (word | int // 8 > 0 and word | int % 8 > 0))) %}
+            Résultat de session indisponible
+          {% elif word | int % 8 == 1 %}Actualisation en cours
+          {% elif word | int % 8 == 2 %}Commande en cours
+          {% else %}Au repos · Zigbee actif{% endif %}
+
+script:
+  phev_execute:
+    alias: "PHEV · exécuter une demande"
+    description: >-
+      Une seule publication sans retenue et sans reprise. Le résultat .19 est
+      lu dans un seul session_word. Un acquittement protocole ne garantit pas
+      que le chauffage ou la climatisation fonctionne effectivement.
+    icon: mdi:car-connected
+    mode: single
+    max_exceeded: silent
+    fields:
+      operation:
+        name: Opération
+        required: true
+        selector:
+          select:
+            options: [refresh, heat, cool, windscreen, stop]
+    sequence:
+      - variables:
+          requested: "{{ operation | default('') }}"
+          starting_word: >-
+            {% set raw = states('sensor.outlander_phev_remote_session_word') | float(-1) %}
+            {{ raw | int if 0 <= raw <= 16777215 and raw == raw | int(-1)
+               and (raw == 0 or (raw | int // 8 > 0 and raw | int % 8 > 0)) else -1 }}
+          requested_duration: "{{ states('input_select.phev_duree') }}"
+          gateway_recent: >-
+            {% set u = states.sensor.outlander_phev_remote_uptime %}
+            {% set age = as_timestamp(now()) - as_timestamp(u.last_updated, 0)
+                         if u is defined and u is not none else -1 %}
+            {{ is_state('binary_sensor.phev_rapports_recents', 'on')
+               and u is defined and u is not none and 0 <= age <= 120
+               and 0 <= states('sensor.outlander_phev_remote_uptime') | float(-1) < 1000000000 }}
+      - variables:
+          starting_sequence: "{{ starting_word | int(-1) // 8 }}"
+          blocked_reason: >-
+            {% if requested not in ['refresh', 'heat', 'cool', 'windscreen', 'stop'] %}
+              Opération inconnue : aucune commande envoyée.
+            {% elif not gateway_recent %}
+              Passerelle sans rapport récent : aucune commande envoyée.
+            {% elif not is_state('sensor.outlander_phev_remote_gateway_mode', 'normal') %}
+              Passerelle en maintenance ou mode inconnu : aucune commande envoyée.
+            {% elif not (0 <= starting_word <= 16777215 and starting_word == starting_word | int(-1)) %}
+              Résultat de session indisponible : aucune commande envoyée.
+            {% elif starting_word | int % 8 in [1, 2] %}
+              Une session est déjà en cours : aucune commande ajoutée.
+            {% elif requested not in ['refresh', 'stop'] and (requested_duration | string) not in ['10', '20', '30'] %}
+              Durée invalide : aucune commande envoyée.
+            {% endif %}
+      - if:
+          - condition: template
+            value_template: "{{ blocked_reason | trim != '' }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.phev_dernier_resultat
+            data:
+              value: "{{ blocked_reason | trim }}"
+          # Ce stop termine uniquement le script ; il n'envoie pas d'arrêt HVAC.
+          - stop: "Demande bloquée avant publication MQTT."
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.phev_dernier_resultat
+        data:
+          value: "Demande {{ requested }} en cours ; attente du résultat de cette session."
+      - action: mqtt.publish
+        continue_on_error: true
+        data:
+          topic: zigbee2mqtt/Outlander-PHEV-Remote/set
+          qos: 0
+          retain: false
+          payload: >-
+            {% if requested == 'refresh' %}
+              {{ {'refresh': 'refresh'} | to_json }}
+            {% else %}
+              {{ {'mode_command': requested if requested != 'stop' else 'cool',
+                  'duration_command': (requested_duration | string) if requested != 'stop' else '10',
+                  'climate_command': requested != 'stop'} | to_json }}
+            {% endif %}
+      - wait_template: >-
+          {% set word = states('sensor.outlander_phev_remote_session_word') | float(-1) %}
+          {{ 0 <= word <= 16777215 and word == word | int(-1)
+             and word | int // 8 > 0
+             and word | int // 8 != starting_sequence
+             and word | int % 8 >= 3 }}
+        timeout: "00:01:15"
+        continue_on_timeout: true
+      - variables:
+          finished_word: >-
+            {% set raw = states('sensor.outlander_phev_remote_session_word') | float(-1) %}
+            {{ raw | int if 0 <= raw <= 16777215 and raw == raw | int(-1)
+               and (raw == 0 or (raw | int // 8 > 0 and raw | int % 8 > 0)) else -1 }}
+      - variables:
+          terminal_status: >-
+            {{ finished_word | int(-1) % 8 if wait.completed
+               and 0 <= finished_word <= 16777215
+               and finished_word == finished_word | int(-1)
+               and finished_word | int // 8 != starting_sequence else -1 }}
+      - variables:
+          result_message: >-
+            {% if terminal_status == 3 and requested == 'refresh' %}
+              Actualisation terminée ; les dernières mesures reçues sont affichées.
+            {% elif terminal_status == 4 and requested != 'refresh' %}
+              Commande {{ requested }} acquittée par le protocole. Fonctionnement réel HVAC non confirmé ; état affiché = dernière observation.
+            {% elif terminal_status == 5 %}
+              Délai de session dépassé ; aucune reprise automatique de la demande.
+            {% elif terminal_status == 6 %}
+              Liaison Wi-Fi/PHEV interrompue ; aucune reprise automatique de la demande.
+            {% elif terminal_status == 7 %}
+              Commande refusée ou non acquittée ; aucune reprise automatique de la demande.
+            {% elif terminal_status == -1 %}
+              Aucun résultat de nouvelle session sous 75 s ; commande non confirmée, sans nouvelle tentative.
+            {% else %}
+              Résultat de session inattendu ; commande non confirmée, sans nouvelle tentative.
+            {% endif %}
+          request_failed: "{{ not ((terminal_status == 3 and requested == 'refresh') or (terminal_status == 4 and requested != 'refresh')) }}"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.phev_dernier_resultat
+        data:
+          value: "{{ result_message | trim }}"
+      - if:
+          - condition: state
+            entity_id: input_boolean.phev_notifications
+            state: "on"
+          - condition: template
+            value_template: "{{ request_failed or terminal_status == 4 }}"
+        then:
+          - action: notify.mobile_app_s26u_seb
+            data:
+              title: "{{ 'PHEV · demande non confirmée' if request_failed else 'PHEV · acquittement reçu' }}"
+              message: "{{ result_message | trim }}"
+              data:
+                tag: phev-demande
+                url: /dashboard-maison/phev
+
+  phev_actualiser:
+    alias: "PHEV · actualiser les informations"
+    icon: mdi:refresh
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - action: script.phev_execute
+        data: {operation: refresh}
+
+  phev_chauffer:
+    alias: "PHEV · chauffer"
+    icon: mdi:car-seat-heater
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - action: script.phev_execute
+        data: {operation: heat}
+
+  phev_refroidir:
+    alias: "PHEV · refroidir"
+    icon: mdi:snowflake
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - action: script.phev_execute
+        data: {operation: cool}
+
+  phev_degivrer:
+    alias: "PHEV · désembuer le pare-brise"
+    icon: mdi:car-defrost-front
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - action: script.phev_execute
+        data: {operation: windscreen}
+
+  phev_arreter:
+    alias: "PHEV · arrêter la préclimatisation"
+    icon: mdi:stop-circle-outline
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - action: script.phev_execute
+        data: {operation: stop}
+
+  phev_maintenance_ap:
+    alias: "PHEV · redémarrer en maintenance AP"
+    description: "Coupe la liaison PHEV et Zigbee. Retour normal depuis le portail web."
+    icon: mdi:access-point
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - variables:
+          word: "{{ states('sensor.outlander_phev_remote_session_word') | float(-1) }}"
+      - if:
+          - condition: template
+            value_template: >-
+              {{ not is_state('sensor.outlander_phev_remote_gateway_mode', 'normal')
+                 or not (0 <= word <= 16777215 and word == word | int(-1)
+                         and (word == 0 or (word | int // 8 > 0 and word | int % 8 > 0)))
+                 or word | int % 8 in [1, 2]
+                 or states('sensor.phev_etat_passerelle') != 'Au repos · Zigbee actif' }}
+        then:
+          - action: input_text.set_value
+            target: {entity_id: input_text.phev_dernier_resultat}
+            data: {value: "Maintenance refusée : passerelle indisponible ou session en cours. Aucune commande envoyée."}
+          - stop: "Maintenance bloquée avant publication MQTT."
+      - action: mqtt.publish
+        data:
+          topic: zigbee2mqtt/Outlander-PHEV-Remote/set
+          payload: '{"maintenance_mode":"ap"}'
+          qos: 0
+          retain: false
+      - action: input_text.set_value
+        target: {entity_id: input_text.phev_dernier_resultat}
+        data: {value: "Maintenance AP demandée : Zigbee sera suspendu. Utiliser le portail web pour revenir en mode normal."}
+
+  phev_maintenance_wifi:
+    alias: "PHEV · redémarrer en maintenance Wi-Fi maison"
+    description: "Utilise le Wi-Fi maintenance configuré ; OTA via le portail, Zigbee suspendu."
+    icon: mdi:wifi-cog
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - variables:
+          word: "{{ states('sensor.outlander_phev_remote_session_word') | float(-1) }}"
+      - if:
+          - condition: template
+            value_template: >-
+              {{ not is_state('sensor.outlander_phev_remote_gateway_mode', 'normal')
+                 or not (0 <= word <= 16777215 and word == word | int(-1)
+                         and (word == 0 or (word | int // 8 > 0 and word | int % 8 > 0)))
+                 or word | int % 8 in [1, 2]
+                 or states('sensor.phev_etat_passerelle') != 'Au repos · Zigbee actif' }}
+        then:
+          - action: input_text.set_value
+            target: {entity_id: input_text.phev_dernier_resultat}
+            data: {value: "Maintenance refusée : passerelle indisponible ou session en cours. Aucune commande envoyée."}
+          - stop: "Maintenance bloquée avant publication MQTT."
+      - action: mqtt.publish
+        data:
+          topic: zigbee2mqtt/Outlander-PHEV-Remote/set
+          payload: '{"maintenance_mode":"wifi-seb"}'
+          qos: 0
+          retain: false
+      - action: input_text.set_value
+        target: {entity_id: input_text.phev_dernier_resultat}
+        data: {value: "Maintenance Wi-Fi maison demandée : Zigbee sera suspendu. Utiliser le portail web pour revenir en mode normal."}

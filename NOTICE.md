@@ -1,0 +1,10 @@
+# Attribution et licences
+
+Ce projet est une adaptation ESP32-C6 C++/Zigbee du protocole Wi-Fi Mitsubishi PHEV ; il ne prétend pas être une création indépendante de toute référence amont.
+
+- **buxtronix/phev2mqtt**, Ben Buxton, copyright 2021 : référence protocole, messages, XOR, registres et commandes. Base consultée : commit `8f423405eef2f833a6a90a93a577624c5875a24c`. https://github.com/buxtronix/phev2mqtt . Le fichier LICENSE amont est GPLv3 et les en-têtes annoncent GPLv3 ou ultérieure ; le README amont indique encore GPLv2. Nous conservons GPL-3.0-or-later et ces crédits, sans nous baser sur cette ligne ambiguë du README.
+- **Contributions et adaptation ESP32-C6**, Chasticot, 2026 : GPL-3.0-or-later, sauf composants tiers explicitement identifiés. Texte intégral dans `LICENSE`. Documentation et exemples de ce dépôt sous la même licence.
+- **Arduino-ESP32 NetworkClient**, Hristo Gochkov, copyright 2016 : `tools/NetworkClientBounded.cpp` provient de `libraries/Network/src/NetworkClient.cpp` d'Arduino-ESP32 **3.3.12**. https://github.com/espressif/arduino-esp32/tree/3.3.12 . LGPL-2.1-or-later ; en-tête d'origine conservé, texte intégral dans `LICENSES/LGPL-2.1.txt`. Modifications locales : une tentative d'écriture, sélection 20 ms, budget d'écriture 25 ms et envoi non bloquant. Le middleware compile cette copie sans modifier l'installation Arduino globale.
+- **pioarduino platform-espressif32**, plateforme de build Apache-2.0 : https://github.com/pioarduino/platform-espressif32/tree/55.03.312 . **Arduino-ESP32, ESP-IDF, lwIP et bibliothèques Zigbee** sont des dépendances tierces obtenues par le gestionnaire PlatformIO ; leurs licences respectives et notices restent applicables. Voir `docs/DEPENDENCIES.md`.
+
+Mitsubishi et les noms des produits appartiennent à leurs propriétaires respectifs. Aucune affiliation, garantie ou approbation du constructeur. Chaque distributeur doit conserver les notices, fournir les sources correspondantes et respecter les licences des dépendances de son propre build ; ce document n'est pas un avis juridique.

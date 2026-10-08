@@ -49,11 +49,33 @@ String PhevProtocol::tcpFirstRxHex() const {
 
 void PhevProtocol::beginDemandSession() {
   disconnect("nouvelle session a la demande");
+  registrationSession_ = false;
   demandManaged_ = true;
   demandAttempted_ = false;
   lastConnectAttemptMs_ = millis() - kReconnectMs;
   state_.commandAck = state_.commandFailed = false;
   state_.lastTelemetryMs = 0;
+}
+
+bool PhevProtocol::beginRegistrationSession() {
+  if (watchOnly_ || registrationActive()) return false;
+  beginDemandSession(); // exactly one TCP attempt, no reconnect/replay
+  registrationPreviousReadRequests_ = readRequestsAllowed_;
+  readRequestsAllowed_ = false;
+  registrationVinSeen_ = false;
+  registrationSession_ = true;
+  registration_ = Registration::WaitingVehicle;
+  registrationStartedMs_ = millis();
+  return true;
+}
+
+void PhevProtocol::endRegistrationSession() {
+  if (registration_ == Registration::WaitingAck) registration_ = Registration::Uncertain;
+  else if (registration_ == Registration::WaitingVehicle) registration_ = Registration::Cancelled;
+  disconnect("fin inscription explicite");
+  registrationSession_ = false;
+  registrationVinSeen_ = false;
+  readRequestsAllowed_ = registrationPreviousReadRequests_;
 }
 
 void PhevProtocol::disconnect(const char *reason) {
@@ -69,6 +91,8 @@ void PhevProtocol::disconnect(const char *reason) {
                   (unsigned long)tcpTxPings_, started_, (unsigned long)ESP.getFreeHeap());
   }
   if (pending_ && pendingRegister_ == 0x1b) state_.commandFailed = true;
+  if (registrationSession_ && registrationActive())
+    registration_ = registration_ == Registration::WaitingAck ? Registration::Uncertain : Registration::Failed;
   tcp_.stop();
   tcpSessionOpen_ = false;
   txHead_ = txCount_ = 0; // Never carry bytes or a climate request into a new session.
@@ -117,6 +141,11 @@ void PhevProtocol::updateKey(const uint8_t *packet, uint8_t length) {
 
 bool PhevProtocol::sendFrame(uint8_t type, uint8_t ack, uint8_t reg,
                              const uint8_t *data, uint8_t length, int overrideXor) {
+  const bool safeSession = type == 0xf3 ||
+      ((type == 0xf6 || type == 0xe5 || type == 0xe4 || type == 0xe6) && ack == 1);
+  const bool enroll = registration_ == Registration::WaitingAck && type == 0xf6 &&
+      ack == 0 && reg == 0x10 && length == 1 && data && data[0] == 1;
+  if (registrationSession_ && !(safeSession || enroll)) return false;
   // Independent final gate: no climate, enrollment, refresh or other writes
   // can leave this diagnostic firmware, even through a future caller.
   const bool safeRead = readRequestsAllowed_ && type == 0xf6 && ack == 0 && reg == 0x06 && length == 1 && data && data[0] == 3;
@@ -219,6 +248,7 @@ void PhevProtocol::sendRegister(uint8_t reg, const uint8_t *data, uint8_t length
 }
 
 bool PhevProtocol::requestClimate(uint8_t mode, uint8_t durationMinutes) {
+  if (registrationSession_) return false;
   if (watchOnly_) return false;
   if (!state_.online || pending_ || mode > 3 ||
       (durationMinutes != 10 && durationMinutes != 20 && durationMinutes != 30)) {
@@ -235,6 +265,7 @@ bool PhevProtocol::requestClimate(uint8_t mode, uint8_t durationMinutes) {
 }
 
 bool PhevProtocol::requestRefresh() {
+  if (registrationSession_) return false;
   if (watchOnly_ && !readRequestsAllowed_) return false;
   if (!state_.online || pending_) return false;
   const uint8_t refresh = 3;
@@ -367,12 +398,20 @@ void PhevProtocol::processFrame(const uint8_t *frame, uint8_t total,
   } else if (type == 0x6f) {
     if (keyReady_) ++receiveIndex_;
     if (ack == 0) {
+      // MY18/MY2020: VIN + metadata + registered-client count. Never store/log VIN.
+      if (registrationSession_ && registration_ == Registration::WaitingVehicle &&
+          reg == 0x15 && dataLength == 20) {
+        registrationVinSeen_ = true;
+        if (data[19] >= 2) registration_ = Registration::Full;
+      }
       updateRegister(reg, data, dataLength);
       state_.lastTelemetryMs = millis();
       const uint8_t zero = 0;
       sendFrame(0xf6, 1, reg, &zero, 1);
     } else if (ack == 1 && pending_ && reg == pendingRegister_) {
       pending_ = false;
+      if (registrationSession_ && registration_ == Registration::WaitingAck && reg == 0x10)
+        registration_ = Registration::Acknowledged;
       if (reg == 0x1b) {
         state_.commandAck = true;
         state_.commandFailed = false;
@@ -385,6 +424,7 @@ void PhevProtocol::processFrame(const uint8_t *frame, uint8_t total,
       pendingSinceMs_ = millis();
     } else {
       pending_ = false;
+      if (registrationSession_ && pendingRegister_ == 0x10) registration_ = Registration::Uncertain;
       if (pendingRegister_ == 0x1b) state_.commandFailed = true;
     }
   }
@@ -465,6 +505,14 @@ void PhevProtocol::processRx() {
 }
 
 void PhevProtocol::tick(bool wifiConnected) {
+  if (registrationSession_) {
+    if (!registrationActive()) return;
+    if (registration_ == Registration::WaitingVehicle && elapsed(millis(), registrationStartedMs_, 20000)) {
+      registration_ = Registration::Failed;
+      disconnect("inscription: initialisation/VIN absent apres 20 s");
+      return;
+    }
+  }
   if (!wifiConnected) {
     if (tcpSessionOpen_ || tcp_.connected() || state_.online || rxLength_) {
       Serial.printf("[%lu ms] PHEV: session interrompue, Wi-Fi deconnecte (%lu octets, %lu trames, %lu pings envoyes)\n",
@@ -529,6 +577,7 @@ void PhevProtocol::tick(bool wifiConnected) {
     } else {
       Serial.printf("[%lu ms] PHEV: echec TCP vers 192.168.8.46:8080 duree=%lu ms wifi=%d; voir erreur NetworkClient precedente\n",
                     (unsigned long)millis(), (unsigned long)(millis() - attemptStarted), (int)WiFi.status());
+      if (registrationSession_) registration_ = Registration::Failed;
     }
     return;
   }
@@ -554,7 +603,14 @@ void PhevProtocol::tick(bool wifiConnected) {
   }
   if (pending_ && elapsed(now, pendingSinceMs_, 10000)) {
     pending_ = false;
+    if (registrationSession_ && pendingRegister_ == 0x10) registration_ = Registration::Uncertain;
     if (pendingRegister_ == 0x1b) state_.commandFailed = true;
+  }
+  if (registrationSession_ && registration_ == Registration::WaitingVehicle && started_ && registrationVinSeen_) {
+    registration_ = Registration::WaitingAck;
+    const uint8_t one = 1; // upstream client register: F6/request/10/[01]
+    sendRegister(0x10, &one, 1);
+    if (!pending_) registration_ = Registration::Uncertain;
   }
   if (readRequestsAllowed_ && started_ && !initialRefreshSent_ && !pending_ &&
       elapsed(now, lastUpdateRequestMs_, 1000)) {

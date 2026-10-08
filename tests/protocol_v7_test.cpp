@@ -32,8 +32,105 @@ struct Session {
   void rx(const Bytes &b) { network.inject(b); p.tick(true); }
   void init() { rx(initA5); CHECK(p.state().online); }
 };
+using Registration = PhevProtocol::Registration;
+struct RegistrationSession {
+  PhevProtocol p;
+  RegistrationSession() {
+    network = FakeNetwork{}; network.now = 100;
+    CHECK(p.beginRegistrationSession()); p.tick(true);
+    CHECK(network.connectAttempts == 1);
+  }
+  void rx(const Bytes &b) { network.inject(b); p.tick(true); }
+  void init() { rx(frame(0x6e,0,1,{0})); CHECK(p.state().online); }
+  void vin(uint8_t count = 1) { Bytes data(20,0); data[19] = count; rx(frame(0x6f,0,0x15,data)); }
+};
 int main() {
   const std::vector<std::pair<const char*,std::function<void()>>> tests = {
+    {"registration never starts from ordinary VIN traffic", [] {
+      Session s; s.rx(frame(0x6e,0,1,{0})); Bytes data(20,0); data[19]=1;
+      s.rx(frame(0x6f,0,0x15,data)); CHECK(s.p.registration()==Registration::Idle);
+      CHECK(std::count(network.writes.begin(),network.writes.end(),frame(0xf6,0,0x10,{1}))==0);
+    }},
+    {"registration disabled in watch-only diagnostic", [] {
+      Session s(true); const auto n=network.writes.size();
+      CHECK(!s.p.beginRegistrationSession()); CHECK(network.writes.size()==n);
+    }},
+    {"registration waits for init AND full MY18 VIN then exact one request", [] {
+      RegistrationSession s;
+      s.rx(frame(0x6f,0,0x15,Bytes(19,0)));
+      CHECK(s.p.registration()==Registration::WaitingVehicle);
+      s.vin(); CHECK(s.p.registration()==Registration::WaitingVehicle);
+      s.init(); CHECK(s.p.registration()==Registration::WaitingAck);
+      CHECK(network.writes.back()==frame(0xf6,0,0x10,{1}));
+      s.vin(); s.p.tick(true);
+      CHECK(std::count(network.writes.begin(),network.writes.end(),frame(0xf6,0,0x10,{1}))==1);
+      CHECK(!s.p.requestClimate(2,10)); CHECK(!s.p.requestClimate(0,10)); CHECK(!s.p.requestRefresh());
+    }},
+    {"registration refuses full slots without unregister or enrollment write", [] {
+      RegistrationSession s; s.init(); s.vin(2);
+      CHECK(s.p.registration()==Registration::Full);
+      CHECK(std::count(network.writes.begin(),network.writes.end(),frame(0xf6,0,0x10,{1}))==0);
+      auto n=network.writes.size(); s.p.tick(true); CHECK(network.writes.size()==n);
+    }},
+    {"registration ACK correlated to pending request and not HVAC confirmation", [] {
+      RegistrationSession s; s.init(); s.vin();
+      s.rx(frame(0x6f,1,0x1b,{0})); CHECK(s.p.registration()==Registration::WaitingAck);
+      s.rx(frame(0x6f,1,0x10,{0})); CHECK(s.p.registration()==Registration::Acknowledged);
+      CHECK(!s.p.state().commandAck && !s.p.state().climateValid);
+      CHECK(!s.p.requestClimate(2,10)); CHECK(!s.p.requestRefresh());
+      s.p.endRegistrationSession(); CHECK(s.p.registration()==Registration::Acknowledged);
+      CHECK(!s.p.tcpConnected());
+    }},
+    {"registration encrypted VIN ACK and request use sequential XOR", [] {
+      RegistrationSession s; s.rx(initA5); Bytes data(20,0); data[19]=1;
+      s.rx(frame(0x6f,0,0x15,data,0xa5));
+      CHECK(s.p.registration()==Registration::WaitingAck);
+      CHECK(network.writes[network.writes.size()-2]==frame(0xf6,1,0x15,{0},0xa5));
+      CHECK(network.writes.back()==frame(0xf6,0,0x10,{1},0x19));
+      s.rx(frame(0x6f,1,0x10,{0},0x19)); CHECK(s.p.registration()==Registration::Acknowledged);
+    }},
+    {"registration EOF before request fails, after request stays uncertain, no reconnect", [] {
+      for(bool sent: {false,true}) {
+        RegistrationSession s; if(sent) { s.init(); s.vin(); }
+        network.connected=false; network.now=200; s.p.tick(true);
+        CHECK(s.p.registration()==(sent?Registration::Uncertain:Registration::Failed));
+        network.now=60500; s.p.tick(true); CHECK(network.connectAttempts==1);
+      }
+    }},
+    {"registration failed TCP connect is failure before enrollment not cancellation", [] {
+      network=FakeNetwork{}; network.now=100; network.allowConnect=false;
+      PhevProtocol p; CHECK(p.beginRegistrationSession()); p.tick(true);
+      CHECK(p.registration()==Registration::Failed); CHECK(p.demandTransportEnded());
+      network.now=60100; p.tick(true); CHECK(network.connectAttempts==1);
+      p.endRegistrationSession(); CHECK(p.registration()==Registration::Failed);
+    }},
+    {"registration VIN deadline includes time without WiFi and handles clock wrap", [] {
+      network=FakeNetwork{}; network.now=0xfffff000U; PhevProtocol p;
+      CHECK(p.beginRegistrationSession()); p.tick(false);
+      network.now=0xfffff000U+20000U; p.tick(false); CHECK(p.registration()==Registration::Failed);
+      CHECK(network.connectAttempts==0);
+    }},
+    {"registration ACK timeout and cancel never imply safe replay", [] {
+      RegistrationSession s; s.init(); s.vin(); network.now=10100; s.p.tick(true);
+      CHECK(s.p.registration()==Registration::Uncertain);
+      auto n=network.writes.size(); network.now=60100; s.p.tick(true); CHECK(network.writes.size()==n);
+      RegistrationSession t; t.p.endRegistrationSession(); CHECK(t.p.registration()==Registration::Cancelled);
+      RegistrationSession u; u.init(); u.vin(); u.p.endRegistrationSession(); CHECK(u.p.registration()==Registration::Uncertain);
+    }},
+    {"registration wrong-encoding retries are limited to two in same session", [] {
+      RegistrationSession s; s.init(); s.vin();
+      s.rx(frame(0xbb,0,0x10,{0x23})); CHECK(network.writes.back()==frame(0xf6,0,0x10,{1},0x23));
+      s.rx(frame(0xbb,0,0x10,{0x23})); CHECK(s.p.registration()==Registration::WaitingAck);
+      auto n=network.writes.size(); s.rx(frame(0xbb,0,0x10,{0x23}));
+      CHECK(s.p.registration()==Registration::Uncertain); CHECK(network.writes.size()==n);
+    }},
+    {"registration blocked TX expires, drops suffix and cannot replay", [] {
+      RegistrationSession s; s.init(); network.writeError=EWOULDBLOCK; s.vin();
+      CHECK(s.p.registration()==Registration::WaitingAck); CHECK(s.p.txQueued()==2);
+      network.now=1600; s.p.tick(true); CHECK(s.p.registration()==Registration::Uncertain);
+      CHECK(!s.p.tcpConnected() && s.p.txQueued()==0);
+      network.writeError=0; network.now=60500; s.p.tick(true); CHECK(network.connectAttempts==1);
+    }},
     {"demand session starts immediately and cannot reconnect until a NEW request", [] {
       network = FakeNetwork{}; network.now=500;
       PhevProtocol p; p.beginDemandSession(); p.tick(true);

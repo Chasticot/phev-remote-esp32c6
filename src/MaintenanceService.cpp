@@ -163,8 +163,12 @@ void MaintenanceService::installRoutes() {
   const char *headers[] = {"X-CSRF-Token"}; web_.collectHeaders(headers, 1);
   web_.addMiddleware([this](WebServer &server, Middleware::Callback next) {
     if (!active()) { server.send(403, "text/plain", "Maintenance uniquement"); return false; }
-    if ((homeMode() || server.uri() == "/update") && !authenticate()) return false;
+    if ((homeMode() || server.uri() == "/update" || server.uri().startsWith("/registration")) && !authenticate()) return false;
     if (server.method() == HTTP_POST && !tokenValid()) { server.send(403, "text/plain", "Token de la page expire : recharger"); return false; }
+    if (exclusiveOperation_ && exclusiveOperation_() &&
+        ((server.method() == HTTP_POST && server.uri() != "/registration/cancel") || server.uri() == "/update")) {
+      server.send(409, "text/plain", "Inscription en cours : attendre ou annuler avant une autre operation"); return false;
+    }
     server.sendHeader("Cache-Control", "no-store");
     server.sendHeader("X-Frame-Options", "DENY");
     return next();

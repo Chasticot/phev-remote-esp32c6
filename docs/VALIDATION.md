@@ -5,6 +5,7 @@ Base source : firmware interne `.34/.35`, Outlander PHEV MY2020, ESP32-C6-DevKit
 - `.34` : commande HA chauffage 10 minutes, ACK et retour actif/heat/10, confirmation physique de l'utilisateur. Arrêt HA environ cinq minutes plus tard, ACK et retour inactif. Wi-Fi coupé, Zigbee actif à la fin.
 - `.35` : lecture au démarrage et retour au repos validés ; conservation d'ACK après perte TCP et exclusion SOC pendant HVAC ajoutées et testées côté hôte. Pas de nouveau cycle de chauffage physique sur cette version.
 - `0.1.0-beta.1` : configuration MAC/NVS générique, texte maintenance, dépendances figées et packaging public. Tests/compilation consignés par la CI et les résultats de préparation, **pas un nouveau test physique**.
+- `0.1.0-beta.2-dev` : documentation du cas Samsung et inscription directe ESP manuelle via AP. Scénarios init/VIN/ACK/XOR, places pleines, coupures, annulation, timeout et absence de rejeu couverts côté hôte. **Inscription native ESP et nouvelles routes web non testées physiquement**, aucun flash de la carte en service ni demande d'inscription à la voiture. La beta.1 publiée reste inchangée.
 
 Couverture logicielle : protocole deux variantes, fragments/XOR, écritures partielles/FIFO expirée, reconnexion sans rejeu, sessions/cache/horloge, maintenance/OTA, ZCL, résultat atomique, observateur TCP, identité configurable, convertisseur groupé et templates HA natifs. Les mocks ne prouvent pas l'interopérabilité RF en conditions réelles.
 

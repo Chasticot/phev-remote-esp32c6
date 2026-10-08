@@ -43,6 +43,12 @@ struct PhevState {
 
 class PhevProtocol {
  public:
+  enum class Registration : uint8_t { Idle, WaitingVehicle, WaitingAck, Acknowledged, Full, Failed, Uncertain, Cancelled };
+  // Explicit local maintenance only; never entered by tick(), boot or Zigbee.
+  bool beginRegistrationSession();
+  void endRegistrationSession();
+  Registration registration() const { return registration_; }
+  bool registrationActive() const { return registration_ == Registration::WaitingVehicle || registration_ == Registration::WaitingAck; }
   const PhevState &state() const { return state_; }
   bool tcpConnected() { return tcp_.connected(); }
   uint32_t tcpConnectCount() const { return tcpConnectCount_; }
@@ -66,6 +72,10 @@ class PhevProtocol {
   void failClimate() { state_.commandAck = false; state_.commandFailed = true; }
 
  private:
+  Registration registration_ = Registration::Idle;
+  bool registrationSession_ = false, registrationVinSeen_ = false;
+  bool registrationPreviousReadRequests_ = false;
+  uint32_t registrationStartedMs_ = 0;
   WiFiClient tcp_;
   uint32_t tcpConnectCount_ = 0;
   uint32_t tcpRxBytes_ = 0;

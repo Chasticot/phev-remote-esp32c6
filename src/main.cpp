@@ -6,6 +6,7 @@
 #include <Zigbee.h>
 #include <esp_wifi.h>
 #include <esp_system.h>
+#include <esp_mac.h>
 #include <esp_coexist.h>
 #include <esp_ieee802154.h>
 #include "PhevTcpCompat.h"
@@ -42,7 +43,7 @@
 // ESP32-C6-DevKitC-1U v1.2. Poussoirs externes entre la broche et GND.
 constexpr uint8_t PIN_ZIGBEE = 2;
 constexpr uint8_t PIN_PORTAL = 3;
-constexpr char FIRMWARE_VERSION[] = "0.1.0-beta.1";
+constexpr char FIRMWARE_VERSION[] = "0.1.0-beta.2-dev";
 constexpr bool SUSPEND_ZIGBEE_DURING_PHEV = false;
 constexpr uint32_t WATCH_TEST_MS = 90000;
 bool watchTestStopped = false;
@@ -90,6 +91,11 @@ bool testMode = false;
 bool scanInProgress = false;
 bool scanPending = false;
 bool testConnectPending = false;
+// RAM-only intent: reboot/power loss can never restart an enrollment.
+bool registrationQueued = false, registrationRunning = false, registrationHasProtocol = false;
+uint32_t registrationQueuedMs = 0, registrationRunningMs = 0;
+String registrationMac, registrationPreviousMac, registrationDetail;
+bool registrationBusy() { return registrationQueued || registrationRunning; }
 int8_t scanError = 0;
 uint32_t scanRequestedMs = 0, testConnectRequestedMs = 0;
 bool staMacApplied = false;
@@ -591,6 +597,142 @@ bool prepareTestPortal() {
   return false;
 }
 
+String nativeStaMac() {
+  uint8_t mac[6];
+  if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return "";
+  char formatted[18];
+  snprintf(formatted, sizeof(formatted), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return formatted;
+}
+
+const char *registrationStatus() {
+  using R = PhevProtocol::Registration;
+  if (registrationQueued) return "queued";
+  if (!registrationHasProtocol) return "idle";
+  switch (phev.registration()) {
+    case R::WaitingVehicle: return "waiting_vehicle";
+    case R::WaitingAck: return "waiting_ack";
+    case R::Acknowledged: return "acknowledged";
+    case R::Full: return "full";
+    case R::Failed: return "failed";
+    case R::Uncertain: return "uncertain";
+    case R::Cancelled: return "cancelled";
+    default: return "idle";
+  }
+}
+
+void finishRegistration() {
+  registrationQueued = registrationRunning = false;
+  phev.endRegistrationSession();
+  // Even an ACK does not overwrite the working identity. Adoption is a second POST.
+  if (registrationPreviousMac.length()) {
+    clonedMacText = registrationPreviousMac;
+    parseMac(clonedMacText, clonedMac);
+    registrationPreviousMac = "";
+  }
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_AP);
+  staMacApplied = carWifiBegun = false;
+  portalOpenedMs = millis();
+  Serial.printf("Inscription terminee: %s; identite NVS inchangee\n", registrationStatus());
+}
+
+void tickRegistration() {
+  if (registrationQueued && elapsed(millis(), registrationQueuedMs, 350)) {
+    registrationQueued = false;
+    registrationRunning = true;
+    registrationRunningMs = millis();
+    registrationPreviousMac = clonedMacText;
+    clonedMacText = registrationMac;
+    parseMac(clonedMacText, clonedMac);
+    staMacApplied = false;
+    phev.disconnect("preparation inscription locale");
+    if (!prepareTestPortal() || !applyCarWifiProfile()) {
+      registrationDetail = "Preparation impossible; aucune inscription lancee.";
+      finishRegistration(); return;
+    }
+    uint8_t actual[6] = {};
+    if (esp_wifi_get_mac(WIFI_IF_STA, actual) != ESP_OK || memcmp(actual, clonedMac, 6) != 0) {
+      registrationDetail = "MAC native non confirmee; tentative annulee.";
+      finishRegistration(); return;
+    }
+    registrationHasProtocol = phev.beginRegistrationSession();
+    if (!registrationHasProtocol) {
+      registrationDetail = "Session inscription refusee; aucune demande envoyee.";
+      finishRegistration(); return;
+    }
+    WiFi.setAutoReconnect(false);
+    // A single association request; never use connectCarWifi's retry loop.
+    WiFi.begin(carSsid.c_str(), carPassword.c_str());
+  }
+  if (!registrationRunning) return;
+  if (wifiGotIpEvent) {
+    wifiGotIpEvent = false;
+    beginPhevTcpCompat();
+  }
+  if (elapsed(millis(), registrationRunningMs, 45000)) {
+    registrationDetail = "Limite locale 45 s atteinte; verifier avant toute nouvelle tentative.";
+    finishRegistration(); return;
+  }
+  phev.tick(WiFi.status() == WL_CONNECTED);
+  if (phev.demandTransportEnded() || !phev.registrationActive()) finishRegistration();
+}
+
+bool registrationLocal() {
+  return portalActive && !maintenance.homeMode() && web.client().localIP() == WiFi.softAPIP();
+}
+
+void showRegistrationPage() {
+  if (!registrationLocal()) {
+    web.send(403, "text/plain", "Inscription reservee au point d'acces local."); return;
+  }
+  String page = R"HTML(<!doctype html><html lang='fr'><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'><title>Inscription ESP au PHEV</title>
+<style>body{font:16px system-ui;max-width:650px;margin:24px auto;padding:0 14px}button{padding:10px;margin:8px}pre{white-space:pre-wrap}</style>
+<h1>Inscrire l'ESP dans la voiture</h1><p><a href='/'>Configuration</a></p>
+<p>Fonction experimentale, non encore validee sur voiture. Ce n'est pas l'appairage Zigbee.
+Elle inscrit la MAC Wi-Fi native de cette carte, pas celle du telephone.</p>
+<p>MAC native ESP : <code>)HTML";
+  page += htmlEscape(nativeStaMac());
+  page += R"HTML(</code></p><p>Configurer d'abord le SSID REMOTE et sa cle sur la page principale.
+Pour une premiere installation sans MAC inscrite, saisir la MAC native ci-dessus, enregistrer,
+puis revenir au portail via GPIO3. Aucune inscription n'est faite au demarrage.</p>
+<p>Preparer le mode appairage constructeur (5 min, une place libre), feux de detresse eteints.
+Fermer l'application Mitsubishi, deconnecter le telephone de REMOTE et les autres passerelles.
+Ne pas lancer la procedure d'effacement des inscriptions.</p>
+<p>Une seule tentative, pas de suppression ni commande de climatisation. Le portail peut couper
+ou changer de canal : se reconnecter au Wi-Fi PHEV-C6, puis recharger cette page.</p>
+<form method='post' action='/registration/start'>
+<label><input type='checkbox' name='confirm' value='yes' required>
+Je suis sur place, la voiture est en mode inscription, une place est libre et les autres clients sont deconnectes.</label>
+<button id='start'>Inscrire la MAC native de cet ESP</button></form>
+<p id='result'>Chargement...</p><pre id='detail'></pre>
+<form method='post' action='/registration/cancel'><button>Annuler la tentative</button></form>
+<form method='post' action='/registration/adopt'>
+<label><input type='checkbox' name='confirm' value='yes' required>
+Apres ACK, remplacer explicitement la MAC configuree par celle de cet ESP.</label>
+<button id='adopt' disabled>Utiliser cette MAC et redemarrer en mode normal</button></form>
+<p>Un ACK n'est pas une verification apres inscription. Mettre la voiture OFF puis demander
+une lecture depuis HA. En cas de resultat incertain, ne pas relancer en boucle.
+L'ancienne MAC configuree reste conservee tant que vous ne validez pas le remplacement.</p>
+<script>async function poll(){try{let r=await fetch('/registration/status',{cache:'no-store'});
+if(!r.ok)throw Error('Authentification ou portail indisponible');let s=await r.json();
+const labels={idle:'Aucune tentative',queued:'Preparation du Wi-Fi',waiting_vehicle:'Attente initialisation et registre VIN (VIN masque)',
+waiting_ack:'Demande envoyee, attente ACK',acknowledged:'ACK recu : inscription a verifier par une lecture normale',
+full:'Deux places occupees : aucune demande envoyee',failed:'Echec avant demande',uncertain:'Resultat incertain : ne pas relancer sans verification',
+cancelled:'Annule avant demande'};
+document.getElementById('result').textContent=labels[s.result]||s.result;
+document.getElementById('detail').textContent=s.detail;
+document.getElementById('start').disabled=s.busy;
+document.getElementById('adopt').disabled=s.busy||s.result!=='acknowledged';
+}catch(e){document.getElementById('result').textContent='Reconnecter au portail PHEV-C6 puis recharger.';
+document.getElementById('start').disabled=true;document.getElementById('adopt').disabled=true;}}
+poll();setInterval(poll,2000);</script></html>)HTML";
+  maintenance.decoratePage(page);
+  web.send(200, "text/html; charset=utf-8", page);
+}
+
 String statusJson() {
   const PhevState s = (testMode || wifiOnlyBoot) ? phev.state() : telemetry.state(uptimeMs());
   String result = "{\"configured\":" + String(configured ? "true" : "false");
@@ -685,6 +827,7 @@ void showPage() {
   page += F("<small>Ne pas utiliser le telephone et l'ESP simultanement sur la voiture avec la meme MAC.</small>"
             "<button>Enregistrer et redemarrer</button></form></fieldset>"
             "<p><a href='/test'>Page de test PHEV sans Zigbee</a></p>"
+            "<p><a href='/registration'>Inscrire directement la MAC native ESP (experimental, AP local + admin)</a></p>"
             "<fieldset><legend>Zigbee</legend><p>Association conservee. Pour un nouvel appairage : revenir au mode normal, puis utiliser GPIO2.</p></fieldset>"
             "<p><small>Diagnostic JSON : <a href='/status'>/status</a>. Le portail s'arrete apres 30 minutes.</small></p>"
             "<script>async function runScan(){let b=document.getElementById('scanButton'),s=document.getElementById('scanStatus');"
@@ -762,6 +905,51 @@ status();setInterval(status,2000);
 }
 
 void setupWeb() {
+  maintenance.setExclusiveOperation(registrationBusy);
+  web.on("/registration", HTTP_GET, showRegistrationPage);
+  web.on("/registration/status", HTTP_GET, [] {
+    if (!registrationLocal()) { web.send(403, "text/plain", "AP local uniquement"); return; }
+    web.send(200, "application/json", "{\"busy\":" + String(registrationBusy() ? "true" : "false") +
+             ",\"result\":\"" + String(registrationStatus()) + "\",\"detail\":\"" + jsonEscape(registrationDetail) + "\"}");
+  });
+  web.on("/registration/start", HTTP_POST, [] {
+    if (!registrationLocal() || PHEV_RAW_TCP_TEST || PHEV_PROTOCOL_WATCH_TEST) {
+      web.send(403, "text/plain", "Inscription uniquement dans le firmware normal, en AP local."); return;
+    }
+    if (!configured || testMode || testConnectPending || scanPending || scanInProgress || maintenance.updating() || maintenance.rebootPending()) {
+      web.send(409, "text/plain", "Configurer la voiture; arreter test/scan/OTA avant inscription."); return;
+    }
+    if (web.arg("confirm") != "yes") { web.send(400, "text/plain", "Confirmation sur place obligatoire"); return; }
+    registrationMac = nativeStaMac();
+    uint8_t parsed[6];
+    if (!parseMac(registrationMac, parsed)) { web.send(500, "text/plain", "MAC native indisponible"); return; }
+    registrationDetail = "";
+    registrationHasProtocol = false;
+    registrationQueued = true;
+    registrationQueuedMs = millis();
+    web.sendHeader("Location", "/registration"); web.send(303, "text/plain", "Une tentative explicite programmee; reconnecter au portail si necessaire.");
+  });
+  web.on("/registration/cancel", HTTP_POST, [] {
+    if (!registrationLocal()) { web.send(403, "text/plain", "AP local uniquement"); return; }
+    if (registrationBusy()) {
+      registrationDetail = "Annulation locale; aucun effacement sur la voiture. Une demande deja envoyee peut avoir ete acceptee.";
+      // A queued attempt has not touched Wi-Fi, TCP or the old identity.
+      if (registrationRunning) finishRegistration();
+      else registrationQueued = false;
+    }
+    web.sendHeader("Location", "/registration"); web.send(303, "text/plain", "Tentative terminee");
+  });
+  web.on("/registration/adopt", HTTP_POST, [] {
+    if (!registrationLocal()) { web.send(403, "text/plain", "AP local uniquement"); return; }
+    if (web.arg("confirm") != "yes" || registrationBusy() || !registrationHasProtocol || phev.registration() != PhevProtocol::Registration::Acknowledged || registrationMac != nativeStaMac()) {
+      web.send(409, "text/plain", "Confirmation et ACK de cette tentative requis; aucun changement"); return;
+    }
+    if (!prefs.putString("mac", registrationMac)) { web.send(500, "text/plain", "Echec NVS; ne pas redemarrer avant verification"); return; }
+    if (!maintenance.queueReboot(BootMode::Normal)) {
+      web.send(500, "text/plain", "MAC ESP sauvegardee; redemarrer manuellement en mode normal"); return;
+    }
+    web.send(200, "text/plain", "MAC native adoptee. Mettre voiture OFF, puis verifier une lecture normale depuis HA.");
+  });
   web.on("/", HTTP_GET, showPage);
   web.on("/test", HTTP_GET, showTestPage);
   web.on("/status", HTTP_GET, [] { web.send(200, "application/json", statusJson()); });
@@ -1146,6 +1334,7 @@ void loop() {
   }
   maintenance.tick();
   if (!wifiOnlyBoot && maintenance.active()) web.handleClient();
+  if (registrationBusy()) { tickRegistration(); updateLed(); delay(10); return; }
   if (!PHEV_PROTOCOL_WATCH_TEST && !zigbeePausedForDemand) handleButtons();
   if (maintenance.homeMode()) {
     if (WiFi.status() == WL_CONNECTED && !homeAddressReported) {

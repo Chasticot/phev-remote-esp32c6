@@ -16,6 +16,7 @@ class MaintenanceService {
   bool updating() const { return uploadActive_; }
   bool rebootPending() const { return rebootQueued_; }
   void setBeforeUpdate(void (*callback)()) { beforeUpdate_ = callback; }
+  void setExclusiveOperation(bool (*callback)()) { exclusiveOperation_ = callback; }
   bool homeConfigured() const { return homeSsid_.length() && homePassword_.length() >= 8; }
   const String &homeSsid() const { return homeSsid_; }
   const String &homePassword() const { return homePassword_; }
@@ -42,6 +43,7 @@ class MaintenanceService {
   bool identityFound_ = false;
   uint8_t identityMatched_ = 0;
   void (*beforeUpdate_)() = nullptr;
+  bool (*exclusiveOperation_)() = nullptr;
   bool authenticate();
   bool tokenValid() const;
   void uploadChunk();

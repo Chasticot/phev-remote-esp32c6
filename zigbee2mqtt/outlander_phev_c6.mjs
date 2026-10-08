@@ -1,5 +1,5 @@
 // Copier dans data/external_converters de Zigbee2MQTT.
-// Firmware associe : PHEV-Remote-C6, 0.1.0-beta.1, 28 endpoints.
+// Firmware associe : PHEV-Remote-C6, beta.1 / beta.2-dev, 28 endpoints inchanges.
 // Ne jamais publier une commande MQTT avec retain=true.
 import * as exposes from 'zigbee-herdsman-converters/lib/exposes';
 
@@ -169,7 +169,7 @@ export default {
     zigbeeModel: ['Outlander-PHEV-Remote'],
     model: 'Outlander-PHEV-Remote',
     vendor: 'PHEV-C6',
-    version: '0.1.0-beta.1',
+    version: '0.1.0-beta.2-dev',
     meta: {
         overrideHaDiscoveryPayload: payload => {
             // Z2M uses bracket notation in real discovery; dot notation is

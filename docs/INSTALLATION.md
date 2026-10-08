@@ -6,7 +6,7 @@ ESP32-C6-DevKitC-1/1U 8 Mo, alimentation USB stable, antenne adaptée à la cart
 
 ## Identité Wi-Fi voiture
 
-La carte ne peut pas deviner une identité acceptée par la voiture. Obtenir une **MAC cliente déjà inscrite sur votre véhicule** par la procédure constructeur/outils appropriés. L'outil Go [phev2mqtt](https://github.com/buxtronix/phev2mqtt) documente `client register` ; consulter sa documentation de la version utilisée. Ce firmware ne réalise ni inscription ni suppression de clients. Ne pas utiliser de MAC appartenant à quelqu'un d'autre.
+La carte ne peut pas deviner une identité acceptée par la voiture. Obtenir une **MAC cliente déjà inscrite sur votre véhicule** par la procédure constructeur/outils appropriés. L'outil Go [phev2mqtt](https://github.com/buxtronix/phev2mqtt) documente `client register` ; consulter sa documentation de la version utilisée. Les sources `0.1.0-beta.2-dev` ajoutent une [inscription directe expérimentale de la MAC ESP](MAC-ET-INSCRIPTION.md), réservée au portail AP authentifié, avec confirmation manuelle. L'image beta.1 ne l'inclut pas. Aucune version ne supprime de clients. Ne pas utiliser de MAC appartenant à quelqu'un d'autre.
 
 Déconnecter le téléphone ou adaptateur d'origine dont la MAC est utilisée et fermer l'application Mitsubishi avant le test. Une seule station active avec la même MAC ; ne jamais garder l'adaptateur d'origine connecté en parallèle.
 

@@ -1,6 +1,6 @@
 # PHEV Remote ESP32-C6
 
-Passerelle **Wi-Fi Mitsubishi Outlander PHEV → Zigbee2MQTT → Home Assistant**, avec configuration AP et mise à jour OTA sur le Wi-Fi local. Version **0.1.0-beta.1**.
+Passerelle **Wi-Fi Mitsubishi Outlander PHEV → Zigbee2MQTT → Home Assistant**, avec configuration AP et mise à jour OTA sur le Wi-Fi local. Sources **0.1.0-beta.2-dev** ; dernière release **v0.1.0-beta.1**.
 
 Projet indépendant, adapté du travail de rétroingénierie de [buxtronix/phev2mqtt](https://github.com/buxtronix/phev2mqtt). Ce dépôt n'est ni le logiciel Go original ni un produit officiel Mitsubishi. Voir [crédits et licences](NOTICE.md).
 
@@ -11,6 +11,7 @@ Projet indépendant, adapté du travail de rétroingénierie de [buxtronix/phev2
 - Connexion voiture uniquement à la demande : première lecture 15 s après démarrage, puis une tentative toutes les 24 h. Session bornée à 60 s, aucun rejeu d'une commande dans une session suivante.
 - Au repos : Wi-Fi voiture arrêté, Zigbee actif ; dernières observations conservées avec âge et validité. Un ACK n'est pas une confirmation physique de fonctionnement HVAC.
 - AP de configuration et OTA web authentifiée. La maintenance suspend Zigbee et ne se fait pas par OTA Zigbee.
+- Sur `main` seulement : inscription directe expérimentale de la MAC native ESP via AP local + admin, confirmation explicite, sans suppression de clients ni changement automatique de la MAC existante.
 
 **Pas de CAN, LoRa, GPS, niveau d'essence ni consommation dans ce firmware.**
 
@@ -28,7 +29,7 @@ Le firmware source a été testé sur un **Outlander PHEV 2020** : lecture batte
 4. Optionnel : installer le package et les cartes [Home Assistant](homeassistant/README.md).
 5. Configurer le SSID/clé de maintenance et un code OTA d'au moins 12 caractères via AP. Les mises à jour suivantes utilisent ce réseau local.
 
-La carte **ne fait pas d'inscription automatique dans la voiture**. Si vous n'avez pas encore d'identité enregistrée, effectuer l'inscription d'un client à l'aide de la procédure Mitsubishi et d'un outil adapté tel que phev2mqtt ; ne pas effacer les inscriptions existantes sans nécessité. Déconnecter le client d'origine pendant l'utilisation de sa MAC. Voir la procédure détaillée et les précautions avant de commander HVAC.
+La carte **ne fait jamais d'inscription automatique dans la voiture**. Sur les nouvelles sources `main`, un bouton AP permet de demander manuellement l'inscription de sa MAC native ; cette fonction n'a pas encore été validée sur véhicule et n'existe pas dans l'image beta.1. Voir [MAC Samsung Android, faits observés et inscription directe ESP](docs/MAC-ET-INSCRIPTION.md). La voie `phev2mqtt client register` reste possible. Ne pas effacer les inscriptions existantes sans nécessité ; déconnecter le client d'origine pendant l'utilisation de sa MAC.
 
 ## Compilation et tests
 
@@ -47,6 +48,7 @@ python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -p 'test_*.py'
 python homeassistant/test_ha_controls.py
 node --experimental-vm-modules tests/converter_test.mjs
+node tests/registration_page_test.mjs
 python tests/run_host.py --compiler g++
 ```
 

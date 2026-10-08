@@ -78,7 +78,7 @@ class ReleaseSafety(unittest.TestCase):
 
     def test_atomic_session_start_terminal_and_prompt_zigbee_reporting(self):
         source = (ROOT / 'src/main.cpp').read_text(encoding='utf-8')
-        self.assertIn('0.1.0-beta.1', source)
+        self.assertIn('0.1.0-beta.2-dev', source)
         self.assertIn('ZigbeeAnalog epSessionResult(28)', source)
         self.assertIn('static uint8_t payloads[29][10]', source)
         self.assertIn('ep.getEndpoint() > 28', source)
